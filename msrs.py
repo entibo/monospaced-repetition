@@ -54,7 +54,7 @@ def parse(file_str):
     options = {
         "ratings": "1234",
         "desired_retention": 0.9,
-        "new_cards_per_day": 10,
+        "daily_new_cards": 10,
     }
 
     cards = []
@@ -205,10 +205,7 @@ def schedule(cards: list[Card], options):
     while new_cards:
         date = date + timedelta(days=1)
 
-        n_due = len(calendar[date])
-        n = max(2, 10 - n_due)
-
-        for _ in range(n):
+        for _ in range(options["daily_new_cards"]):
             if not new_cards:
                 break
 
