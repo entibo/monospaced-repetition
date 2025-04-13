@@ -1,3 +1,6 @@
+flit build
+flit publish
+
 #cards
 #reviews
 #streak_days
@@ -93,7 +96,7 @@ You should default to `Again` | `Good` and use the other two if you feel like th
 
 ## Desired retention
 
-Probability that you remember a card when it's due. 
+Probability that you remember a card when it's due.
 
 Use this to control the frequency of reviews.
 
