@@ -1,0 +1,24 @@
+{
+  "name": "msrs",
+  "version": "1.0.0",
+  "description": "TODO",
+  "bin": {
+    "msrs": "src/cli.js"
+  },
+  "type": "module",
+  "keywords": [
+    "learning",
+    "spaced repetition",
+    "fsrs",
+    "anki"
+  ],
+  "author": "Thibaut Guénédal <thibautguenedal@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/entibo/monospaced-repetition.git"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "yaml": "^2.7.1"
+  }
+}
