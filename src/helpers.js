@@ -19,3 +19,10 @@ export function memoObject(fn) {
     return r
   }
 }
+export function addToMap(map, key, value) {
+  if (!map.has(key)) {
+    map.set(key, [value])
+  } else {
+    map.get(key).push(value)
+  }
+}

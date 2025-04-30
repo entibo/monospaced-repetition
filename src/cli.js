@@ -8,7 +8,10 @@ import {
   addReview,
   getDate,
 } from './forgetting-curve/forgetting-curve.js'
-import { memoObject, sortBy } from './helpers.js'
+import { addToMap, memoObject, sortBy } from './helpers.js'
+import { frameLines, mergeLines } from './drawing-utils.js'
+
+const DAYS = 1000 * 60 * 60 * 24
 
 const RATINGS = {
   again: Rating.AGAIN,
@@ -22,7 +25,7 @@ const YAMLOptions = {
   schema: 'core',
   customTags: [timestamp],
   nullStr: '',
-  lineWidth: 80,
+  lineWidth: 60,
 }
 
 const currentDate = new Date()
@@ -50,28 +53,27 @@ if (doc.errors.length) {
 }
 
 if (!yaml.isMap(doc.contents)) {
-  const type =
-    doc.contents === null
-      ? 'null'
-      : yaml.isSeq(doc.contents)
-      ? 'list'
-      : typeof doc.contents.value
-
-  console.error(`Error: expected top-level map (got ${type})`)
-  process.exit(1)
+  if (doc.contents === null) {
+    doc.contents = doc.createNode({})
+  } else {
+    const type = yaml.isSeq(doc.contents) ? 'list' : typeof doc.contents.value
+    console.error(`Error: expected top-level map (got ${type})`)
+    process.exit(1)
+  }
 }
 
 const defaultOptions = doc.createNode({
   target_retention: 0.9,
-  compact: false,
   rating: {
-    location: 'end',
     placeholder: '',
+    location: 'end',
     again: '1',
     hard: '2',
     good: '3',
     easy: '4',
   },
+  compact: false,
+  locale: 'en',
 })
 
 // Read user options or use defaults
@@ -123,11 +125,13 @@ function extractMarks(card) {
   yaml.visit(card, {
     Node(_, node) {
       for (const key of ['comment', 'commentBefore']) {
-        const commentValue = node[key]?.split('\n')?.at(-1).trim()
-        if (commentValue && !commentValue.startsWith('#')) {
+        const rawComment = node[key]
+        delete node[key]
+        if (!rawComment || rawComment.length > 3) continue
+        const commentValue = rawComment.split('\n')?.at(-1).trim()
+        if (commentValue) {
           marks.push(commentValue)
         }
-        delete node[key]
       }
     },
   })
@@ -140,7 +144,7 @@ function extractNewRatings(card) {
 
   for (const mark of extractMarks(card)) {
     const match = Object.entries(RATINGS).find(
-      ([name, _]) => mark === options.value.getIn(['rating', name]),
+      ([name, _]) => mark == options.value.getIn(['rating', name]),
     )
     if (match) {
       const [name, value] = match
@@ -174,9 +178,10 @@ function normalizeCardValue(card) {
   const { value } = card
 
   if (yaml.isSeq(value)) {
-    const lastItem = card.value.items.at(-1)
+    value.flow = false
+    const lastItem = value.items.at(-1)
     if (!yaml.isMap(lastItem)) {
-      card.value.items.push(doc.createNode({}))
+      value.items.push(doc.createNode({}))
     }
     return
   }
@@ -237,9 +242,16 @@ for (const card of cards) {
   }
 }
 
+// Sort the reviews (most recent one first)
+for (const card of cards) {
+  const reviewMap = getReviewsMap(card)
+  if (!reviewMap) continue
+  reviewMap.items.sort(sortBy((pair) => pair.key.value)).reverse()
+}
+
 // Sort and group cards by due date
 
-function getActualReviews(card) {
+const getActualReviews = memoObject(function (card) {
   const reviewMap = getReviewsMap(card)
   if (!reviewMap) return []
 
@@ -260,6 +272,18 @@ function getActualReviews(card) {
   }
 
   return reviews.sort(sortBy(({ date }) => date))
+})
+
+const getDifficulty = (card) => {
+  const reviews = getActualReviews(card)
+  if (!reviews.length) return
+
+  let memory
+  for (const { date, rating } of reviews) {
+    memory = addReview(memory, { date, rating })
+  }
+
+  return memory.difficulty
 }
 
 const getDueDate = memoObject(function (card) {
@@ -271,38 +295,279 @@ const getDueDate = memoObject(function (card) {
     memory = addReview(memory, { date, rating })
   }
 
-  return getDate(memory, options.value.get('target_retention'))
+  const dueDate = getDate(memory, options.value.get('target_retention'))
+  // We could stop here and return dueDate
+
+  let interval = (dueDate - memory.lastDate) / DAYS
+
+  // Add some variation to the date to avoid cards sticking together
+  {
+    // A unique number, given a card's question and review history
+    let hash = 0
+    for (const c of JSON.stringify([card.key.value, memory])) {
+      hash = hash * 31 + c.charCodeAt(0)
+    }
+
+    // A uniformly distributed number between -1 and 1, given a hash
+    const x = Math.sin(hash) * 10000
+    const factor = x - Math.trunc(x)
+
+    // Plus or minus 10%
+    interval = interval * (1 + factor * 0.1)
+  }
+
+  // Don't schedule for the same day (unless we failed to recall)
+  {
+    if (reviews.at(-1).rating !== RATINGS.again) {
+      interval = Math.max(1, interval)
+    }
+  }
+
+  return new Date(Number(memory.lastDate) + interval * DAYS)
 })
 
-// Sort by due date ascending, followed by cards without a due date
-cards.sort(sortBy((card) => getDueDate(card) ?? Infinity))
+const locale = options.value.get('locale')
 
-const isCompact = Boolean(options.value.get('compact'))
+const compactOption = Boolean(options.value.get('compact'))
 
-const firstOfGroup = new Set()
-for (const card of cards) {
-  const dueDate = getDueDate(card)
-  const group = dueDate ? toISODateString(dueDate) : 'New'
-  if (!firstOfGroup.has(group)) {
-    firstOfGroup.add(group)
+// Options on top, then new cards, then cards sorted by due date
+cards.sort(sortBy((card) => getDueDate(card) ?? -1))
+doc.contents.items = [options, ...cards]
 
-    card.key.commentBefore =
-      '#'.repeat(35) +
-      ' ' +
-      group +
-      (isCompact ? '' : '\n') +
-      (card.key.commentBefore ?? '')
-  }
-  card.key.spaceBefore = !isCompact
+function addCommentBefore(card, comment, compact = compactOption) {
+  // Existing comment with a rating or serving as placeholder for one
+  const previousComment = card.key.commentBefore
+    ? '\n' + card.key.commentBefore
+    : ''
+
+  card.key.commentBefore = comment + (compact ? '' : '\n') + previousComment
 }
 
-doc.contents.items = [options, ...cards]
+// Group by new / due date
+
+const newCards = []
+const cardsByDate = new Map()
+const cardsByMonth = new Map()
+
+for (const card of cards) {
+  const dueDate = getDueDate(card)
+  if (!dueDate) {
+    newCards.push(card)
+    continue
+  }
+
+  const fullDate = toISODateString(dueDate)
+  const month = fullDate.slice(0, 7)
+  addToMap(cardsByDate, fullDate, card)
+  addToMap(cardsByMonth, month, card)
+}
+
+function drawMonthLines(date) {
+  const month = date.toLocaleDateString(locale, { month: 'long' })
+  const year = date.toLocaleDateString(locale, { year: 'numeric' })
+  return frameLines([month], { title: year, /* padding: 1 */ minWidth: 16 })
+}
+
+//                        ╭────╮ ╭──────────╮
+//                 Friday │ 08 │ │ November │
+//                        ╰────╯ ╰─────2024─╯
+function drawDueComment(date, isFirstOfMonth) {
+  const dateNumber = date.getDate().toString().padStart(2, '0')
+  const dateFrame = frameLines([dateNumber], { padding: 1 })
+  const weekday = date.toLocaleDateString(locale, { weekday: 'long' })
+
+  const dateDayLines = mergeLines(
+    ['', weekday.padStart(32), ''],
+    [' '],
+    dateFrame,
+  )
+  if (!isFirstOfMonth) {
+    return dateDayLines.join('\n')
+  }
+
+  const monthLines = drawMonthLines(date)
+
+  return mergeLines(dateDayLines, [' '], monthLines) //
+    .join('\n')
+}
+
+// Add a comment on top of each due date group
+
+for (const [fullDate, cards] of cardsByDate) {
+  const firstCard = cards[0]
+  const month = fullDate.slice(0, 7)
+  const isFirstOfMonth = firstCard === cardsByMonth.get(month)[0]
+  addCommentBefore(
+    firstCard,
+    drawDueComment(getDueDate(firstCard), isFirstOfMonth),
+  )
+}
+
+// Show empty months
+if (cardsByMonth.size >= 2) {
+  const firstDueDate = getDueDate([...cardsByMonth.values()][0][0])
+
+  for (const [card] of [...cardsByMonth.values()].reverse()) {
+    const dueDate = getDueDate(card)
+
+    let monthDate = new Date(dueDate)
+    monthDate.setDate(15)
+    while (true) {
+      monthDate.setMonth(monthDate.getMonth() - 1)
+
+      if (monthDate <= firstDueDate) break
+      if (cardsByMonth.has(toISODateString(monthDate).slice(0, 7))) break
+
+      const monthLines = drawMonthLines(monthDate).map((line) =>
+        line.padStart(58),
+      )
+
+      addCommentBefore(card, monthLines.join('\n'), true)
+    }
+  }
+}
+
+/** Insert commas every 3 digits: `1,234,567` */
+function prettyNumber(num) {
+  // return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+  let str = num.toLocaleString([locale, 'en'])
+  // French uses "Narrow No-Break Space"
+  str = str.replace(/\s/g, ' ')
+  return str
+}
+
+// J E 10 ي Sz Б Ş ज
+function getMonthLabel(date) {
+  const label = date.toLocaleDateString(locale ?? undefined, {
+    month: 'narrow',
+  })
+  // If numbers are used, keep the numbers only (e.g. 3月 -> 3)
+  const numbers = label.match(/(\d+)/)?.[1]
+  return numbers ?? label
+}
+
+// M   J   J    A   S    O   N   D    J   F   M    A
+//    █ █▀   ▀ ▀ ▀▀         ▄█                       █▀
+//   ████▀       ▄         █                       ▄ █
+//   ▀▀█▄ ▀  ▄   ▀          ▀                ▄   ▄  ▄▀
+//   ▀ ▀ ▀                                          ▀▀
+const TOPDAY = 1 // SUNDAY=0 MONDAY=1
+export function activityLines(now, getReviews) {
+  const topOffset = (7 + now.getDay() - TOPDAY) % 7
+
+  const cols = []
+  for (let i = 0; i < 52; i++) {
+    const col = []
+    {
+      const date = new Date(now)
+      date.setDate(date.getDate() - topOffset - i * 7)
+      const d = date.getDate()
+
+      // if (d <= 7) col.push((date.getMonth() + 1).toString())
+      if (d <= 7) col.push(getMonthLabel(date))
+      else col.push(' ')
+    }
+
+    // col.push(' ') // Empty line between labels and straks
+
+    const masks = [0, 0, 0, 0]
+    for (let j = 0; j < 7; j++) {
+      const date = new Date(now)
+      date.setDate(date.getDate() - topOffset - i * 7 + j)
+      const k = j //+ 1
+      if (getReviews(date).length) {
+        masks[Math.floor(k / 2)] += 1 + (k % 2)
+      }
+    }
+    col.push(...masks.map((mask) => ' ▀▄█'[mask]))
+    cols.push(col)
+  }
+
+  // First column is `now`, but we want it on the right
+  cols.reverse()
+
+  cols.unshift(Array(cols[0].length).fill(' '))
+  cols.push(Array(cols[0].length).fill(' '))
+
+  // Transpose into lines
+  const lines = []
+  for (let i = 0; i < cols[0].length; i++) {
+    let line = ''
+    for (let j = 0; j < cols.length; ) {
+      const value = cols[j][i]
+      line += value
+      // Month labels longer than 1 character overwrite the next column(s)
+      j += value.length
+    }
+    lines.push(line)
+  }
+
+  return lines
+}
+
+// Draw stats and graphs
+if (cards.length) {
+  const reviews = cards.flatMap((card) => getActualReviews(card))
+
+  const reviewsByDate = new Map()
+  for (const { date, rating } of reviews) {
+    addToMap(reviewsByDate, toISODateString(date), rating)
+  }
+  function getReviews(date) {
+    return reviewsByDate.get(toISODateString(date)) ?? []
+  }
+
+  const lines = [
+    mergeLines(
+      ['  '],
+      frameLines([prettyNumber(cards.length)], {
+        minWidth: 16,
+        title: 'cards',
+      }),
+      [' '],
+      frameLines([prettyNumber(reviews.length)], {
+        minWidth: 16,
+        title: 'reviews',
+      }),
+      [' '],
+      frameLines([toISODateString(currentDate)], {
+        minWidth: 16,
+        title: 'updated',
+      }),
+    ),
+    mergeLines(
+      ['  '],
+      frameLines(activityLines(currentDate, getReviews), { title: 'activity' }),
+    ),
+  ].flat()
+
+  addCommentBefore(cards[0], lines.join('\n'), false)
+}
+
+// Add an empty line before each card?
+{
+  for (const card of cards) {
+    card.key.spaceBefore = !compactOption
+  }
+}
+
+// Add space before first card = between options and stats
+const firstCard = cards[0]
+if (firstCard) {
+  firstCard.key.spaceBefore = true
+}
+
+// Add space after new cards to make adding new cards easier
+const firstDueCard = Array.from(cardsByDate.values())[0]?.[0]
+if (firstDueCard) {
+  firstDueCard.key.spaceBefore = true
+}
 
 // Write file back
 
 let newFileSource = yaml.stringify(doc, YAMLOptions)
 
-// Replace the space between anchor and key in "&- question" with a tab
+// Replace the space between anchor and key in "&- Question" with a tab
 // to avoid shifting the question and having to re-position the cursor
 // HACK: i haven't found a proper way to do this
 newFileSource = newFileSource.replace(/^(&\S) /gm, '$1\t')
