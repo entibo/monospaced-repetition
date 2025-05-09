@@ -65,14 +65,14 @@ if (!yaml.isMap(doc.contents)) {
 const defaultOptions = doc.createNode({
   target_retention: 0.9,
   rating: {
-    placeholder: '',
     location: 'end',
+    placeholder: '',
     again: '1',
     hard: '2',
     good: '3',
     easy: '4',
   },
-  compact: false,
+  compact: true,
   locale: 'en',
 })
 
@@ -101,15 +101,21 @@ for (const pair of defaultOptions.get('rating', true).items)
   if (!options.value.hasIn(['rating', pair.key]))
     options.value.addIn(['rating'], pair)
 
+const allowedRatingLocations = ['start', 'end', 'outside', 'inside']
+const ratingLocation = options.value.getIn(['rating', 'location'])
+if (ratingLocation && !allowedRatingLocations.includes(ratingLocation)) {
+  console.warn(`Warning: Unknown rating location "${ratingLocation}"`)
+}
+
 // Show default/allowed values in comments
 
 options.value.getIn(['rating', 'location'], true).comment =
-  ' start, end, outside, inside'
+  ' ' + allowedRatingLocations.join(', ')
 // options.get('order', true).comment = ' due, added, random, difficulty'
 // options.get('order', true).flow = true
 options.value.get('target_retention', true).comment = ' 0.70 – 0.98'
 
-// Read the cards
+// Collect the cards
 
 const cards = doc.contents.items.filter((pair) => pair.key?.value !== 'options')
 
@@ -127,8 +133,9 @@ function extractMarks(card) {
       for (const key of ['comment', 'commentBefore']) {
         const rawComment = node[key]
         delete node[key]
-        if (!rawComment || rawComment.length > 3) continue
+        if (!rawComment) continue
         const commentValue = rawComment.split('\n')?.at(-1).trim()
+        if (commentValue.length > 1) continue
         if (commentValue) {
           marks.push(commentValue)
         }
@@ -218,8 +225,9 @@ for (const card of cards) {
   if (newRating) addNewRating(card, newRating)
 
   const placeholder = options.value.getIn(['rating', 'placeholder'])
-  // Add a rating placeholder for next time
-
+  // Add a rating placeholder for next tim.includes(options.value.getIn(['rating', 'location']e))
+  {
+  }
   const commentValue = unknownMarks[0] || placeholder || ' '
   const anchorValue = unknownMarks[0] || placeholder || '-'
 
@@ -237,8 +245,6 @@ for (const card of cards) {
     case 'inside':
       card.value.commentBefore = commentValue
       break
-    default:
-      console.warn(`Warning: Unknown rating location "${ratingLocation}"`)
   }
 }
 
@@ -330,7 +336,7 @@ const locale = options.value.get('locale')
 
 const compactOption = Boolean(options.value.get('compact'))
 
-// Options on top, then new cards, then cards sorted by due date
+// Sort the cards
 cards.sort(sortBy((card) => getDueDate(card) ?? -1))
 doc.contents.items = [options, ...cards]
 
@@ -362,6 +368,57 @@ for (const card of cards) {
   addToMap(cardsByMonth, month, card)
 }
 
+// Generate the schedule hierarchy
+if (false) {
+  // Remove scheduled cards from top-level
+  const scheduledCards = new Set([...cardsByDate.values()].flat())
+  doc.contents.items = doc.contents.items.filter(
+    (item) => !scheduledCards.has(item),
+  )
+
+  const dateMap = new yaml.YAMLMap()
+  dateMap.items = [...cardsByDate.entries()].map(([isoDate, cards]) => {
+    const cardMap = new yaml.YAMLMap()
+    cardMap.items = cards
+    const date = new Date(isoDate)
+    const pair = doc.createPair(date, cardMap)
+    // const pair = doc.createPair(isoDate, cardMap)
+    // const pair =  doc.createPair(
+    //   new Date(isoDate).toLocaleDateString(locale, {
+    //     year: '2-digit',
+    //     month: 'short',
+    //     day: '2-digit',
+    //     weekday: 'short',
+    //   }),
+    //   cardMap,
+    // )
+    const num = cards.length.toString()
+    pair.key.comment =
+      num.padEnd(3) + //
+      date
+        .toLocaleDateString(locale, { month: 'narrow' })
+        .padStart(1 + date.getMonth())
+        .padEnd(12)
+    // '─'.repeat(Math.floor(cards.length)) //
+    // '█'.repeat(Math.floor(cards.length / 8)) +
+    // ' ▏▎▍▌▋▊▉'[cards.length % 8]
+
+    return pair
+  })
+  const schedule = doc.createPair('schedule', dateMap)
+  // doc.contents.items.push(schedule)
+  doc.contents.items.push(...dateMap.items)
+}
+
+// Add an empty line before each card?
+{
+  for (const card of cards) {
+    card.key.spaceBefore = !compactOption
+  }
+}
+
+//
+
 function drawMonthLines(date) {
   const month = date.toLocaleDateString(locale, { month: 'long' })
   const year = date.toLocaleDateString(locale, { year: 'numeric' })
@@ -392,40 +449,77 @@ function drawDueComment(date, isFirstOfMonth) {
 }
 
 // Add a comment on top of each due date group
-
-for (const [fullDate, cards] of cardsByDate) {
-  const firstCard = cards[0]
-  const month = fullDate.slice(0, 7)
-  const isFirstOfMonth = firstCard === cardsByMonth.get(month)[0]
-  addCommentBefore(
-    firstCard,
-    drawDueComment(getDueDate(firstCard), isFirstOfMonth),
-  )
+if (false) {
+  for (const [fullDate, cards] of cardsByDate) {
+    const firstCard = cards[0]
+    const month = fullDate.slice(0, 7)
+    const isFirstOfMonth = firstCard === cardsByMonth.get(month)[0]
+    addCommentBefore(
+      firstCard,
+      drawDueComment(getDueDate(firstCard), isFirstOfMonth),
+    )
+  }
 }
 
-// Show empty months
-if (cardsByMonth.size >= 2) {
-  const firstDueDate = getDueDate([...cardsByMonth.values()][0][0])
+// Group by dates by adding comment headers
+if (true) {
+  /** @param {Date} date */
+  function printDate(date) {
+    const dt = Math.abs(date - currentDate)
 
-  for (const [card] of [...cardsByMonth.values()].reverse()) {
-    const dueDate = getDueDate(card)
+    /** @type {Intl.DateTimeFormatOptions} */
+    const options = {}
+    if (dt < 7 * DAYS) {
+      options.day = 'numeric'
+      options.weekday = 'long'
+    }
+    if (dt < 6 * 30 * DAYS) {
+      options.month = 'long'
+    }
+    // if (date.getFullYear() !== currentDate.getFullYear()) {
+    options.year = 'numeric'
+    // }
 
-    let monthDate = new Date(dueDate)
-    monthDate.setDate(15)
-    while (true) {
-      monthDate.setMonth(monthDate.getMonth() - 1)
+    return date.toLocaleDateString(locale, options)
+  }
 
-      if (monthDate <= firstDueDate) break
-      if (cardsByMonth.has(toISODateString(monthDate).slice(0, 7))) break
-
-      const monthLines = drawMonthLines(monthDate).map((line) =>
-        line.padStart(58),
-      )
-
-      addCommentBefore(card, monthLines.join('\n'), true)
+  const seen = new Set()
+  for (const [fullDate, cards] of cardsByDate) {
+    const firstCard = cards[0]
+    const date = new Date(getDueDate(firstCard))
+    if (true || date > currentDate) {
+      const dateStr = printDate(date)
+      if (seen.has(dateStr)) continue
+      firstCard.key.spaceBefore = true
+      seen.add(dateStr)
+      addCommentBefore(firstCard, ' ' + dateStr)
     }
   }
 }
+
+// Show empty months
+// if (cardsByMonth.size >= 2) {
+//   const firstDueDate = getDueDate([...cardsByMonth.values()][0][0])
+
+//   for (const [card] of [...cardsByMonth.values()].reverse()) {
+//     const dueDate = getDueDate(card)
+
+//     let monthDate = new Date(dueDate)
+//     monthDate.setDate(15)
+//     while (true) {
+//       monthDate.setMonth(monthDate.getMonth() - 1)
+
+//       if (monthDate <= firstDueDate) break
+//       if (cardsByMonth.has(toISODateString(monthDate).slice(0, 7))) break
+
+//       const monthLines = drawMonthLines(monthDate).map((line) =>
+//         line.padStart(58),
+//       )
+
+//       addCommentBefore(card, monthLines.join('\n'), true)
+//     }
+//   }
+// }
 
 /** Insert commas every 3 digits: `1,234,567` */
 function prettyNumber(num) {
@@ -520,6 +614,10 @@ if (cards.length) {
   const lines = [
     mergeLines(
       ['  '],
+      frameLines(activityLines(currentDate, getReviews), { title: 'activity' }),
+    ),
+    mergeLines(
+      ['  '],
       frameLines([prettyNumber(cards.length)], {
         minWidth: 16,
         title: 'cards',
@@ -535,20 +633,9 @@ if (cards.length) {
         title: 'updated',
       }),
     ),
-    mergeLines(
-      ['  '],
-      frameLines(activityLines(currentDate, getReviews), { title: 'activity' }),
-    ),
   ].flat()
 
   addCommentBefore(cards[0], lines.join('\n'), false)
-}
-
-// Add an empty line before each card?
-{
-  for (const card of cards) {
-    card.key.spaceBefore = !compactOption
-  }
 }
 
 // Add space before first card = between options and stats

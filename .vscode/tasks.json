@@ -2,16 +2,32 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Run monospaced-repetition",
+      "label": "msrs",
       "type": "shell",
       "command": "msrs ${file}",
       "presentation": {
         "reveal": "silent"
-      },
-      "group": {
-        "kind": "build",
-        "isDefault": true
       }
+    },
+    {
+      "label": "foldAll",
+      "type": "process",
+      "command": "${command:editor.foldAll}"
+    },
+    {
+      "label": "cursorTop",
+      "type": "process",
+      "command": "${command:cursorTop}"
+    },
+    {
+      "label": "Monospaced Repetition",
+      "problemMatcher": [],
+      "dependsOrder": "sequence",
+      "dependsOn": ["msrs", "foldAll", "cursorTop"]
+      // "group": {
+      //   "kind": "build",
+      //   "isDefault": true
+      // }
     }
   ]
 }

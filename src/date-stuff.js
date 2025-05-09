@@ -26,6 +26,8 @@ export function toISODateString(date) {
  * @param {Date} date
  **/
 export function toISOString(date) {
+  if (date % (24 * 60 * 60 * 1000) === 0) return toISODateString(date)
+
   const tzOffset = -date.getTimezoneOffset()
   const tzHours = Math.floor(Math.abs(tzOffset) / 60)
   const tzMinutes = Math.abs(tzOffset) % 60
