@@ -72,6 +72,7 @@ const defaultOptions = doc.createNode({
     good: '3',
     easy: '4',
   },
+  new_cards: 'start',
   compact: true,
   locale: 'en',
 })
@@ -114,6 +115,7 @@ options.value.getIn(['rating', 'location'], true).comment =
 // options.get('order', true).comment = ' due, added, random, difficulty'
 // options.get('order', true).flow = true
 options.value.get('target_retention', true).comment = ' 0.70 – 0.98'
+options.value.get('new_cards', true).comment = ' start, end'
 
 // Collect the cards
 
@@ -179,15 +181,18 @@ function getReviewsMap(card) {
 
 // Ensure card value:
 // 1. Is a list
-// 2. Last item is a map
+// 2. Last item is a map of dates
 // If not, store the current value as the first item in a list
 function normalizeCardValue(card) {
   const { value } = card
 
   if (yaml.isSeq(value)) {
-    value.flow = false
     const lastItem = value.items.at(-1)
-    if (!yaml.isMap(lastItem)) {
+    if (
+      yaml.isMap(lastItem) &&
+      lastItem.items.every(({ key }) => key.value instanceof Date)
+    ) {
+    } else {
       value.items.push(doc.createNode({}))
     }
     return
@@ -245,6 +250,12 @@ for (const card of cards) {
     case 'inside':
       card.value.commentBefore = commentValue
       break
+  }
+}
+
+for (const card of cards) {
+  if (yaml.isSeq(card.value)) {
+    card.value.flow = false
   }
 }
 
@@ -337,7 +348,9 @@ const locale = options.value.get('locale')
 const compactOption = Boolean(options.value.get('compact'))
 
 // Sort the cards
-cards.sort(sortBy((card) => getDueDate(card) ?? -1))
+const newCardSortValue =
+  options.value.get('new_cards') === 'start' ? -1 : Infinity
+cards.sort(sortBy((card) => getDueDate(card) ?? newCardSortValue))
 doc.contents.items = [options, ...cards]
 
 function addCommentBefore(card, comment, compact = compactOption) {
@@ -494,6 +507,13 @@ if (true) {
       seen.add(dateStr)
       addCommentBefore(firstCard, ' ' + dateStr)
     }
+  }
+
+  const firstNewCard = newCards[0]
+  if (firstNewCard) {
+    firstNewCard.key.spaceBefore = true
+    // addCommentBefore(firstNewCard, ' ' + '-'.repeat(YAMLOptions.lineWidth - 2))
+    addCommentBefore(firstNewCard, 'NEW')
   }
 }
 
